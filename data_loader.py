@@ -220,6 +220,22 @@ def parse_taf_file(file):
 
     return taf_data
 
+def load_fuser(airport_code, type, data_dir, desc='', leave=False):
+    # runways_files = glob.glob(os.path.join(data_dir, 'FUSER_test', airport_code, '**', f'{airport_code}_*runways_data_set.csv'), recursive=True)
+    files = glob.glob(os.path.join(data_dir, airport_code, f'{airport_code}*{type}_data_set.csv'), recursive=True)
+
+    with Pool(cpu_count()) as pool:
+        results = list(tqdm(pool.imap(pd.read_csv, files), total=len(files), desc=desc, leave=leave))
+
+    # for file in tqdm(files, desc=desc, leave=leave):
+    #     data.append(pd.read_csv(file))
+    # arrivals_df = pd.concat(data)
+    # arrivals_df[time_col] = pd.to_datetime(arrivals_df[time_col])
+    # arrivals_df.set_index(time_col, inplace=True)
+    # return arrivals_df
+    return pd.concat(results)
+
+
 def load_data(start, end, files, interval, parser, desc='', leave=False):
     """
     Loads and parses TAF data for a specific airport within a time range.
@@ -285,17 +301,18 @@ if __name__ == '__main__':
         print(f"Remarks: {metar.remarks}")
 
     # taf_df = load_taf_data(datetime(2022, 9, 1, 10, 0), datetime(2022, 9, 30, 11, 30), './data/TAF_train')
-    # taf_df = load_data(datetime(2022, 9, 1, 10, 0),
-    #                    datetime(2022, 9, 30, 11, 30),
-    #                    glob.glob('./data/TAF_train/taf.*.txt'),
-    #                    timedelta(hours=6),
-    #                    parse_taf_file)
-    #
+    taf_df = load_data(start,
+                       end,
+                       glob.glob('./data/TAF_train/taf.*.txt'),
+                       timedelta(hours=6),
+                       parse_taf_file, desc='TAF Data')
+
     # print(taf_df)
-    #
-    #
-    # print(len(taf_df.loc[taf_df['taf'].isnull()]))
-    # print(len(taf_df.loc[taf_df['taf'].notnull()]))
-    # print(len(taf_df.loc[taf_df['taf'].isnull()]) / len(taf_df.loc[taf_df['taf'].notnull()]))
+
+
+    print(len(taf_df.loc[taf_df['taf'].isnull()]))
+    print(len(taf_df.loc[taf_df['taf'].notnull()]))
+    print(len(taf_df.loc[taf_df['taf'].isnull()]) / len(taf_df.loc[taf_df['taf'].notnull()]))
 
     pass
+
