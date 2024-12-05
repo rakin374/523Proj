@@ -1,8 +1,6 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
-
 
 import os
 from multiprocessing import Pool, cpu_count
@@ -29,9 +27,8 @@ def load_actual_arrivals(airport_code, data_dir='data'):
 
     arrival_times = []
 
-    for file in runways_files:
+    for file in tqdm(runways_files, desc='Loading true arrival times'):
         df = pd.read_csv(file, parse_dates=['arrival_runway_actual_time'])
-        df = df[['arrival_runway_actual_time']].dropna()
         arrival_times.append(df)
 
     arrivals_df = pd.concat(arrival_times)
@@ -44,7 +41,7 @@ def load_estimated_arrivals(airport_code, data_dir='data'):
     tfm_files = glob.glob(os.path.join(data_dir, airport_code, '**', f'{airport_code}_*TFM_track_data_set.csv'), recursive=True)
     est_arrivals = []
 
-    for file in tqdm(tfm_files, desc='Loading TFM track data [estimated arrivals]'):
+    for file in tqdm(tfm_files, desc='Loading estimated arrivals'):
         df = pd.read_csv(file, parse_dates=['timestamp', 'arrival_runway_estimated_time'])
         df = df[['timestamp', 'arrival_runway_estimated_time']].dropna()
         est_arrivals.append(df)
@@ -145,38 +142,6 @@ def parse_metar_string(metar_str):
     #         'cloud': None
     #     }
 
-def load_metar_data(airport_code, start, end, data_dir='data'):
-    metar_files = glob.glob(os.path.join(data_dir, 'METAR_train', '**', '*.txt'))
-
-
-    metar_files = filter_file_time(metar_files, start, end)
-
-    metar_data = []
-    for file in (pbar := tqdm(metar_files, desc='LOADING METAR DATA')):
-        pbar.set_postfix_str(f'LOADING METAR DATA: {file}')
-        # encoding = detect_file_encoding(file)
-        encoding = 'utf-8'
-        try:
-            with open(file, 'r', encoding=encoding , errors='ignore') as f:
-                lines = f.readlines()
-                for i in range(0, len(lines), 3):
-                    if i+1 >= len(lines):
-                        # Skip if there's an incomplete pair
-                        continue
-                    date_line = lines[i].strip()
-                    data_line = lines[i+1].strip()
-                    # print(date_line, data_line, sep='\n')
-                    date = pd.to_datetime(date_line, format='%Y/%m/%d %H:%M')
-                    if airport_code in data_line:
-                        parsed_data = parse_metar_string(data_line)
-                        parsed_data['timestamp'] = date
-                        metar_data.append(parsed_data)
-        except Exception as e:
-            log.error(f"Error reading file {file} with encoding {encoding}: {e}")
-            continue
-
-    return get_df(metar_data, start, end)
-
 def parse_metar_file(file):
     metar_data = []
     # encoding = detect_file_encoding(file)
@@ -255,33 +220,7 @@ def parse_taf_file(file):
 
     return taf_data
 
-def load_taf_data(start, end, data_dir):
-    """
-    Loads and parses TAF data for a specific airport within a time range.
-
-    Parameters:
-        # airport_code (str): ICAO code of the airport (e.g., 'SCEL').
-        start (datetime): Start datetime.
-        end (datetime): End datetime.
-        data_dir (str): Base directory containing TAF files.
-
-    Returns:
-        pd.DataFrame: DataFrame with 'timestamp' and 'taf' columns.
-    """
-    taf_files = glob.glob(os.path.join(data_dir, 'taf.*.txt'))
-    taf_files = filter_file_time(taf_files, start, end, interval=timedelta(hours=6))
-    results = []
-
-    # for file in tqdm(taf_files, desc="Processing TAF files"):
-    #     results.append(parse_taf_file(file))
-    with Pool(cpu_count()) as pool:
-        results = list(tqdm(pool.imap(parse_taf_file, taf_files), total=len(taf_files)))
-
-    # Flatten the results into one array # TODO: use numpy or something
-    taf_data = [taf for row in results for taf in row]
-    return get_df(taf_data, start, end)
-
-def load_data(start, end, files, interval, parser):
+def load_data(start, end, files, interval, parser, desc='', leave=False):
     """
     Loads and parses TAF data for a specific airport within a time range.
 
@@ -299,7 +238,7 @@ def load_data(start, end, files, interval, parser):
     # for file in tqdm(taf_files, desc="Processing TAF files"):
     #     results.append(parse_taf_file(file))
     with Pool(cpu_count()) as pool:
-        results = list(tqdm(pool.imap(parser, files), total=len(files)))
+        results = list(tqdm(pool.imap(parser, files), total=len(files), desc=desc, leave=leave))
 
     # Flatten the results into one array # TODO: use numpy or something
     data = [item for row in results for item in row]
@@ -307,33 +246,34 @@ def load_data(start, end, files, interval, parser):
 
 
 if __name__ == '__main__':
-    # actual_arrival_df = load_actual_arrivals('KJFK')
-    # est_arrival_df = load_estimated_arrivals('KJFK')
-    metar_df = load_metar_data("JFK", datetime(2022, 9, 1, 10, 0), datetime(2022, 9, 1, 10, 30))
-    metar = metar_df.iloc[0]['metar']
+    fuser_types = set([re.match(r'.*\.(.*)_data_set.csv', os.path.basename(file)).group(1) for file in glob.glob("data/KATL/*.csv")])
+    airports = set([os.path.basename(file) for file in glob.glob("data/FUSER_test/*")])
 
-    print(metar)
-
-    print(f"Station: {metar.station}")
-    print(f"Observation Time: {metar.day:02d} {metar.time.hour:02d}:{metar.time.minute:02d} UTC")
-    print(f"Wind: {metar.wind.direction} at {metar.wind.speed} {metar.wind.unit}")
-    print(f"Visibility: {metar.visibility.distance}")
-    print(f"Temperature: {metar.temperature}°C")
-    print(f"Dew Point: {metar.dew_point}°C")
-    print(f"Pressure: {metar.altimeter} {metar.altimeter}")
-    if metar.remarks:
-        print(f"Remarks: {metar.remarks}")
+    airport = airports.pop()
+    data = {}
+    for fuser in fuser_types:
+        data[fuser] = load_fuser(airport,
+                                 fuser,
+                                 data_dir='data',
+                                 desc=f'Loading {fuser}',
+                                 leave=True)
 
 
-    metar_df = load_data(datetime(2022, 9, 1, 10, 0),
-                         datetime(2022, 9, 1, 10, 30),
+    actual_arrival_df = load_actual_arrivals('KJFK')
+    print(actual_arrival_df)
+    actual_arrival_df = load_fuser('KJFK', 'runways', data_dir='data', desc='Loading actual arrival times', leave=True)
+
+    print(actual_arrival_df)
+    print(actual_arrival_df)
+    est_arrival_df = load_estimated_arrivals('KJFK')
+    start = datetime(2022, 9, 1, 10, 0)
+    end = datetime(2022, 9, 1, 10, 30)
+    metar_df = load_data(start,
+                         end,
                          glob.glob('./data/METAR_train/**/metar.*.txt'),
                          timedelta(hours=1),
-                         parse_metar_file)
+                         parse_metar_file, desc='Metar Data')
     metar = metar_df.iloc[0]['metar']
-
-    print(metar)
-
     print(f"Station: {metar.station}")
     print(f"Observation Time: {metar.day:02d} {metar.time.hour:02d}:{metar.time.minute:02d} UTC")
     print(f"Wind: {metar.wind.direction} at {metar.wind.speed} {metar.wind.unit}")
