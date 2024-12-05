@@ -13,6 +13,12 @@ import glob
 import logging as log
 from tqdm import tqdm
 from metar_taf_parser.parser.parser import MetarParser, TAFParser
+import torch
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
+import pandas as pd
+from datetime import timedelta
+from typing import Optional, List
 
 log.basicConfig(
     level=log.INFO,
@@ -261,58 +267,94 @@ def load_data(start, end, files, interval, parser, desc='', leave=False):
     return get_df(data, start, end)
 
 
+class NASAAirportDataset(Dataset):
+
+    def __init__(self,
+                 airport_code: str,
+                 start_dt,
+                 end_dt,
+                 data_dir='data',
+                 test=False,
+                 transform=None,
+                 target_transform=None):
+        """
+        A PyTorch Dataset for NASA Airport Throughput Prediction Challenge.
+
+        Parameters:
+            airport_code (str): ICAO code of the airport (e.g., 'KJFK').
+            start_dt (datetime): Start datetime for the data to load.
+            end_dt (datetime): End datetime for the data to load.
+            data_dir (str): Base directory for the data.
+            transform (callable, optional): Optional transform to be applied
+                to the features.
+            target_transform (callable, optional): Optional transform to be applied
+                to the targets.
+        """
+        self.airport_code = airport_code
+        self.start = start_dt
+        self.end = end_dt
+        self.data_dir = data_dir
+
+        if test:
+            fuser_path = os.path.join(data_dir, 'FUSER_test')
+            self.metar_files = glob.glob(os.path.join(data_dir, 'METAR_train', '**', 'metar.*.txt'))
+            self.taf_files = glob.glob(os.path.join(data_dir, 'TAF_train', 'taf.*.txt'))
+        else:
+            fuser_path = data_dir
+            self.metar_files = glob.glob(os.path.join(data_dir, 'METAR_test', 'metar.*.txt'))
+            self.taf_files = glob.glob(os.path.join(data_dir, 'TAF_test', 'taf.*.txt'))
+
+        self.fuser_types = {'ETD', 'LAMP', 'MFS', 'TBFM', 'TFM_track', 'configs', 'first_position', 'runways'}
+        # Test has their own directory; training data is at the higest level
+        fuser_data = {}
+        for fuser in fuser_types:
+            fuser_data[fuser] = load_fuser(airport,
+                                     fuser,
+                                     data_dir=fuser_path,
+                                     desc=f'Loading {fuser}',
+                                     leave=True)
+
+        metar_df = load_data(self.start,
+                             self.end,
+                             self.metar_files,
+                             timedelta(hours=1),
+                             parse_metar_file, desc='Metar Data')
+
+        taf_df = load_data(self.start,
+                           self.end,
+                           self.taf_files,
+                           timedelta(hours=6),
+                           parse_taf_file, desc='TAF Data')
+
+        self.transform = transform
+        self.target_transform = target_transform
+
+        # Load and preprocess the data
+        # self.timestamps, self.X, self.y = preprocess_data(airport_code, start_dt, end_dt, data_dir=self.data_dir)
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        x = self.X[idx]
+        y = self.y[idx]
+
+        if self.transform:
+            x = self.transform(x)
+        if self.target_transform:
+            y = self.target_transform(y)
+
+        return x, y
+
+
 if __name__ == '__main__':
     fuser_types = set([re.match(r'.*\.(.*)_data_set.csv', os.path.basename(file)).group(1) for file in glob.glob("data/KATL/*.csv")])
     airports = set([os.path.basename(file) for file in glob.glob("data/FUSER_test/*")])
 
     airport = airports.pop()
-    data = {}
-    for fuser in fuser_types:
-        data[fuser] = load_fuser(airport,
-                                 fuser,
-                                 data_dir='data',
-                                 desc=f'Loading {fuser}',
-                                 leave=True)
-
-
-    actual_arrival_df = load_actual_arrivals('KJFK')
-    print(actual_arrival_df)
-    actual_arrival_df = load_fuser('KJFK', 'runways', data_dir='data', desc='Loading actual arrival times', leave=True)
-
-    print(actual_arrival_df)
-    print(actual_arrival_df)
-    est_arrival_df = load_estimated_arrivals('KJFK')
     start = datetime(2022, 9, 1, 10, 0)
     end = datetime(2022, 9, 1, 10, 30)
-    metar_df = load_data(start,
-                         end,
-                         glob.glob('./data/METAR_train/**/metar.*.txt'),
-                         timedelta(hours=1),
-                         parse_metar_file, desc='Metar Data')
-    metar = metar_df.iloc[0]['metar']
-    print(f"Station: {metar.station}")
-    print(f"Observation Time: {metar.day:02d} {metar.time.hour:02d}:{metar.time.minute:02d} UTC")
-    print(f"Wind: {metar.wind.direction} at {metar.wind.speed} {metar.wind.unit}")
-    print(f"Visibility: {metar.visibility.distance}")
-    print(f"Temperature: {metar.temperature}°C")
-    print(f"Dew Point: {metar.dew_point}°C")
-    print(f"Pressure: {metar.altimeter} {metar.altimeter}")
-    if metar.remarks:
-        print(f"Remarks: {metar.remarks}")
 
-    # taf_df = load_taf_data(datetime(2022, 9, 1, 10, 0), datetime(2022, 9, 30, 11, 30), './data/TAF_train')
-    taf_df = load_data(start,
-                       end,
-                       glob.glob('./data/TAF_train/taf.*.txt'),
-                       timedelta(hours=6),
-                       parse_taf_file, desc='TAF Data')
+    dataset = NASAAirportDataset(airport_code=airport, start_dt=start, end_dt=end, data_dir='data')
 
-    # print(taf_df)
-
-
-    print(len(taf_df.loc[taf_df['taf'].isnull()]))
-    print(len(taf_df.loc[taf_df['taf'].notnull()]))
-    print(len(taf_df.loc[taf_df['taf'].isnull()]) / len(taf_df.loc[taf_df['taf'].notnull()]))
-
-    pass
 
