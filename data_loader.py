@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 # coding: utf-8
-
-
+import gc
 import os
 from multiprocessing import Pool, cpu_count
 from os import cpu_count
@@ -16,7 +15,8 @@ from metar_taf_parser.parser.parser import MetarParser, TAFParser
 import torch
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
-import pandas as pd
+import pandas as pdf
+from functools import partial
 from datetime import timedelta
 from typing import Optional, List
 
@@ -96,12 +96,12 @@ def filter_file_time(files, start, end, interval=timedelta(hours=1)):
             log.error(f"Filename {basename} does not match the expected pattern.")
     return filtered_files
 
-def get_df(data, start, end):
+def get_df(data, start, end, start_time_col, end_time_col):
     df = pd.DataFrame(data)
-    df.dropna(subset=['timestamp'], inplace=True)
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df = df[(df['timestamp'] >= start) & (df['timestamp'] <= end)]
-    df.set_index('timestamp', inplace=True)
+    # df.dropna(subset=['timestamp'], inplace=True)
+    df[start_time_col] = pd.to_datetime(df[start_time_col])
+    df[end_time_col] = pd.to_datetime(df[end_time_col])
+    df = df[(df[start_time_col] >= start) & (df[end_time_col] <= end)]
     return df
 
 def parse_metar_string(metar_str):
@@ -226,12 +226,20 @@ def parse_taf_file(file):
 
     return taf_data
 
-def load_fuser(airport_code, type, data_dir, desc='', leave=False):
+def load_fuser(airport_code, type, data_dir, types, desc='', leave=False):
     # runways_files = glob.glob(os.path.join(data_dir, 'FUSER_test', airport_code, '**', f'{airport_code}_*runways_data_set.csv'), recursive=True)
     files = glob.glob(os.path.join(data_dir, airport_code, f'{airport_code}*{type}_data_set.csv'), recursive=True)
+    time_cols   =   [col for col, val in types.items() if val == 'datetime']
+    non_time_cols = {col:val for col, val in types.items() if val != 'datetime'}
 
     with Pool(cpu_count()) as pool:
-        results = list(tqdm(pool.imap(pd.read_csv, files), total=len(files), desc=desc, leave=leave))
+        results = list(tqdm(
+                pool.imap(partial(pd.read_csv,
+                                  usecols=list(types.keys()),
+                                  dtype=non_time_cols,
+                                  # parse_dates=time_cols # TODO:
+                                  ), files)
+            , total=len(files), desc=desc, leave=leave))
 
     # for file in tqdm(files, desc=desc, leave=leave):
     #     data.append(pd.read_csv(file))
@@ -239,8 +247,11 @@ def load_fuser(airport_code, type, data_dir, desc='', leave=False):
     # arrivals_df[time_col] = pd.to_datetime(arrivals_df[time_col])
     # arrivals_df.set_index(time_col, inplace=True)
     # return arrivals_df
-    return pd.concat(results)
+    df = pd.concat(results)
+    # if drop_cols:
+    #     df.drop(drop_cols, axis=1, inplace=True)
 
+    return df.drop_duplicates()
 
 def load_data(start, end, files, interval, parser, desc='', leave=False):
     """
@@ -264,11 +275,9 @@ def load_data(start, end, files, interval, parser, desc='', leave=False):
 
     # Flatten the results into one array # TODO: use numpy or something
     data = [item for row in results for item in row]
-    return get_df(data, start, end)
-
+    return get_df(data, start, end, 'timestamp', 'timestamp')
 
 class NASAAirportDataset(Dataset):
-
     def __init__(self,
                  airport_code: str,
                  start_dt,
@@ -304,21 +313,94 @@ class NASAAirportDataset(Dataset):
             self.metar_files = glob.glob(os.path.join(data_dir, 'METAR_test', 'metar.*.txt'))
             self.taf_files = glob.glob(os.path.join(data_dir, 'TAF_test', 'taf.*.txt'))
 
+        # Actual arrival times
+        flights_df = load_fuser(airport,
+                                'runways',
+                                types={'gufi': 'str',
+                                       'arrival_runway_actual_time': 'datetime',
+                                       'arrival_runway_actual': 'datetime',
+                                       },
+                                data_dir=fuser_path,
+                                desc=f'Loading {'runways'}',
+                                leave=True,
+                                )
+        flights_df = flights_df[flights_df['arrival_runway_actual_time'].notna()]
+        flights_df.drop_duplicates(subset='gufi', inplace=True)
+
+        flights_df = flights_df.set_index('gufi')
+
+        # Predicted arrival times
+        tfm_df = load_fuser(airport,
+                   'TFM_track',
+                    types={'gufi': 'str',
+                           'timestamp': 'datetime',
+                           'arrival_runway_estimated_time': 'datetime',
+                           },
+                   data_dir=fuser_path,
+                   desc=f'Loading TFM_track',
+                   leave=True)
+        tfm_df.rename(columns= {'timestamp': 'timestamp_arrival_runway_estimate'}, inplace=True)
+
+        tfm_df.set_index('gufi', inplace=True)
+        # tfm_df = tfm_df.groupby(level='gufi').agg(list)
+        print('merging TFM data')
+        fuser_data = tfm_df.join(flights_df, on='gufi')
+        # flights_df = tfm_df.join(flights_df, on='gufi', how='outer')
+        # Free the memory of the un used df
+        del tfm_df
+        del flights_df
+        gc.collect()
+
+        MFS_df = load_fuser(airport,
+                            'MFS',
+                            data_dir=fuser_path,
+                            desc=f'Loading MFS',
+                            leave=True,
+                            types={'gufi': 'str',
+                                   'aircraft_engine_class': 'category',
+                                   'aircraft_type': 'category',
+                                   'arrival_aerodrome_icao_name': 'category',
+                                   'major_carrier': 'category',
+                                   'flight_type': 'category',
+                                   },
+                            )
+        MFS_df  = MFS_df.set_index('gufi')
+        fuser_data = fuser_data.join(MFS_df, on='gufi')
+        del MFS_df
+        gc.collect()
+
+        TBFM_df = load_fuser(airport,
+                            'TBFM',
+                             types={'gufi': 'str',
+                                    'timestamp': 'datetime',
+                                    'arrival_runway_sta': 'datetime',},
+                            data_dir=fuser_path,
+                            desc=f'Loading TBFM',
+                            leave=True,
+                            )
+        TBFM_df = TBFM_df.set_index('gufi')
+        TBFM_df.rename(columns={'timestamp': 'arrival_runway_sta_time_stamp'}, inplace=True)
+        fuser_data = fuser_data.join(TBFM_df, on='gufi')
+        del TBFM_df
+        gc.collect()
+
         self.fuser_types = {'ETD', 'LAMP', 'MFS', 'TBFM', 'TFM_track', 'configs', 'first_position', 'runways'}
-        # Test has their own directory; training data is at the higest level
+        # Test has their own directory; training data is at the highest level
         fuser_data = {}
-        for fuser in fuser_types:
+        for fuser in [ 'TBFM', ]:
             fuser_data[fuser] = load_fuser(airport,
                                      fuser,
                                      data_dir=fuser_path,
                                      desc=f'Loading {fuser}',
                                      leave=True)
 
+
         metar_df = load_data(self.start,
                              self.end,
                              self.metar_files,
                              timedelta(hours=1),
-                             parse_metar_file, desc='Metar Data')
+                             parse_metar_file, desc='Metar Data'
+                             )
 
         taf_df = load_data(self.start,
                            self.end,
@@ -326,8 +408,8 @@ class NASAAirportDataset(Dataset):
                            timedelta(hours=6),
                            parse_taf_file, desc='TAF Data')
 
-        self.transform = transform
-        self.target_transform = target_transform
+        # self.transform = transform
+        # self.target_transform = target_transform
 
         # Load and preprocess the data
         # self.timestamps, self.X, self.y = preprocess_data(airport_code, start_dt, end_dt, data_dir=self.data_dir)
