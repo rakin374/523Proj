@@ -434,9 +434,100 @@ if __name__ == '__main__':
     airports = set([os.path.basename(file) for file in glob.glob("data/FUSER_test/*")])
 
     airport = airports.pop()
-    start = datetime(2022, 9, 1, 10, 0)
-    end = datetime(2022, 9, 1, 10, 30)
+    start = datetime(2022, 9, 20, 10, 0)
+    end = datetime(2022, 9, 21, 10, 30)
 
-    dataset = NASAAirportDataset(airport_code=airport, start_dt=start, end_dt=end, data_dir='data')
+    # dataset = NASAAirportDataset(airport_code=airport, start_dt=start, end_dt=end, data_dir='data')
+    data_dir = 'data'
+
+    fuser_path = data_dir
+    metar_files = glob.glob(os.path.join(data_dir, 'METAR_test', 'metar.*.txt'))
+    taf_files = glob.glob(os.path.join(data_dir, 'TAF_test', 'taf.*.txt'))
+
+    # # Actual arrival times
+    # flights_df = load_fuser(airport,
+    #                         'runways',
+    #                         types={'gufi': 'str',
+    #                                'arrival_runway_actual_time': 'datetime',
+    #                                'arrival_runway_actual': 'datetime',
+    #                                },
+    #                         data_dir=fuser_path,
+    #                         desc=f'Loading {'runways'}',
+    #                         leave=True,
+    #                         )
+    # flights_df = flights_df[flights_df['arrival_runway_actual_time'].notna()]
+    # flights_df.drop_duplicates(subset='gufi', inplace=True)
+    #
+    # flights_df = flights_df.set_index('gufi')
+    #
+    # # Predicted arrival times
+    # tfm_df = load_fuser(airport,
+    #                     'TFM_track',
+    #                     types={'gufi': 'str',
+    #                            'timestamp': 'datetime',
+    #                            'arrival_runway_estimated_time': 'datetime',
+    #                            },
+    #                     data_dir=fuser_path,
+    #                     desc=f'Loading TFM_track',
+    #                     leave=True)
+    # tfm_df.rename(columns={'timestamp': 'timestamp_arrival_runway_estimate'}, inplace=True)
+    #
+    # tfm_df.set_index('gufi', inplace=True)
+    # # tfm_df = tfm_df.groupby(level='gufi').agg(list)
+    # print('merging TFM data')
+    # fuser_data = tfm_df.join(flights_df, on='gufi')
+    # # flights_df = tfm_df.join(flights_df, on='gufi', how='outer')
+    # # Free the memory of the un used df
+    # del tfm_df
+    # del flights_df
+    # gc.collect()
+    #
+    # MFS_df = load_fuser(airport,
+    #                     'MFS',
+    #                     data_dir=fuser_path,
+    #                     desc=f'Loading MFS',
+    #                     leave=True,
+    #                     types={'gufi': 'str',
+    #                            'aircraft_engine_class': 'category',
+    #                            'aircraft_type': 'category',
+    #                            'arrival_aerodrome_icao_name': 'category',
+    #                            'major_carrier': 'category',
+    #                            'flight_type': 'category',
+    #                            },
+    #                     )
+    # MFS_df = MFS_df.set_index('gufi')
+    # fuser_data = fuser_data.join(MFS_df, on='gufi')
+    # del MFS_df
+    # gc.collect()
+    #
+    # TBFM_df = load_fuser(airport,
+    #                      'TBFM',
+    #                      types={'gufi': 'str',
+    #                             'timestamp': 'datetime',
+    #                             'arrival_runway_sta': 'datetime', },
+    #                      data_dir=fuser_path,
+    #                      desc=f'Loading TBFM',
+    #                      leave=True,
+    #                      )
+    # TBFM_df = TBFM_df.set_index('gufi')
+    # TBFM_df.rename(columns={'timestamp': 'arrival_runway_sta_time_stamp'}, inplace=True)
+    # # fuser_data = fuser_data.join(TBFM_df, on='gufi')
+    # # del TBFM_df
+    # # gc.collect()
+    # fuser_data = TBFM_df
+
+    metar_df = load_data(start,
+                         end,
+                         metar_files,
+                         timedelta(hours=1),
+                         parse_metar_file, desc='Metar Data'
+                         )
+
+    taf_df = load_data(start,
+                       end,
+                       taf_files,
+                       timedelta(hours=6),
+                       parse_taf_file, desc='TAF Data')
+
 
 
