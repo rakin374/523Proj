@@ -438,7 +438,7 @@ def preprocess_fuser(airport, data_dir, out_dir, test=False, leave=True):
                                   'arrival_runway_actual': 'datetime',
                                   },
                            data_dir=fuser_path,
-                           desc=f'Loading {'runways'}',
+                           desc=f'Loading runways',
                            leave=leave,
                            )
     runway_df = runway_df[runway_df['arrival_runway_actual_time'].notna()]
