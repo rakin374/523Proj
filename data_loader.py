@@ -635,8 +635,6 @@ class NASAAirportDataset(Dataset):
 
 
 if __name__ == '__main__':
-    ds = NASAAirportDataset('KCLT', 'data/preprocess/train')
-    row = ds[datetime(2022, 10, 1, 11, 30, 0)]
     # for x, y in ds:
     #     print(x, y)
 
