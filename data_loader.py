@@ -517,6 +517,8 @@ class NASAAirportDataset(Dataset):
     def __init__(self,
                  airport_code: str,
                  data_dir,
+                 scale_min = -1.0,
+                 scale_max = 1.0,
                  transform=None,
                  target_transform=None):
         """
@@ -534,6 +536,8 @@ class NASAAirportDataset(Dataset):
         """
         self.airport_code = airport_code
         self.data_dir = data_dir
+        self.scale_min = scale_min
+        self.scale_max = scale_max
 
         self.runway_df = pd.read_parquet(os.path.join(data_dir, 'fuser', airport_code, 'runway_df.parquet'))
         self.runway_df['arrival_runway_actual_time'] = pd.to_datetime(self.runway_df['arrival_runway_actual_time'],
@@ -552,16 +556,35 @@ class NASAAirportDataset(Dataset):
         self.tfm_df['arrival_runway_estimated_time'] = pd.to_datetime(self.tfm_df['arrival_runway_estimated_time'],
                                                                       format='mixed')
 
-
         for df_name in ['mfs_df', 'tbfm_df', 'tfm_df', 'runway_df']:
             df = getattr(self, df_name)
-            new_cat_cols =  df.select_dtypes(include=['object']).columns
+
+            # Convert object columns to category
+            new_cat_cols = df.select_dtypes(include=['object']).columns
             for col in new_cat_cols:
                 df[col] = df[col].astype('category')
-                # one_hot = pd.get_dummies(df[col])]
-                # df.drop(col, axis=1, inplace=True)
-            cat_cols =  df.select_dtypes(include=['category']).columns
-            setattr(self, df_name, pd.get_dummies(df, columns=cat_cols, dummy_na=True))
+
+            cat_cols = df.select_dtypes(include=['category']).columns
+            df = pd.get_dummies(df, columns=cat_cols, dummy_na=True)
+
+            for one_hot_col in df.select_dtypes(include=['bool']).columns:
+                df[one_hot_col] = df[one_hot_col].astype('int')
+
+            # Identify numeric columns (excluding datetime)
+            datetime_cols = df.select_dtypes(include=['datetime64[ns]', 'datetime64']).columns
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
+            numeric_cols = [c for c in numeric_cols if c not in datetime_cols]
+
+            # Scale numeric columns to [-1, 1]
+            for col in numeric_cols:
+                col_min = df[col].min()
+                col_max = df[col].max()
+                if col_max != col_min:
+                    df[col] = ((df[col] - col_min) / (col_max - col_min)) * (self.scale_max - self.scale_min) + self.scale_min
+                else:
+                    # Constant column, just set it to 0
+                    df[col] = (self.scale_min + self.scale_max) / 2
+            setattr(self, df_name, df)
 
 
         self.transform = transform
@@ -590,9 +613,17 @@ class NASAAirportDataset(Dataset):
             deltas = (runway_rows[col] - timestamp).dt.total_seconds()
             # Scale to [-1, 1] by dividing by 10800 (3 hours)
             runway_rows[col] = deltas / time_window_seconds
+            # TODO: How do we deal with missing tiemes?!?!? setting to max value for now
+            runway_rows[col].fillna(self.scale_max, inplace=True)
 
         y = runway_rows['arrival_runway_actual_time']
         x = runway_rows.drop('arrival_runway_sta_time_stamp', axis=1)
+
+        x = x.to_numpy(dtype='float32')
+        x = torch.tensor(x, dtype=torch.float32)
+
+        y = y.to_numpy(dtype='float32')
+        y = torch.tensor(y, dtype=torch.float32)
 
         # Apply any transformations if defined
         if self.transform:
