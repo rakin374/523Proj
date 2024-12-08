@@ -5,6 +5,7 @@ import os
 import traceback
 from multiprocessing import Pool, cpu_count
 from os import cpu_count
+import random
 import pandas as pd
 import datetime
 from datetime import datetime, timedelta
@@ -430,15 +431,41 @@ def preprocess_fuser(airport, data_dir, out_dir, test=False, leave=True):
 
     os.makedirs(out_dir, exist_ok=True)
 
+    # TODO: load 'configs', fun facts about the airport
+
+    first_position_df = load_fuser(airport,
+                           'first_position',
+                           types={'gufi': 'str',
+                                  'time_first_tracked': 'datetime',
+                                  },
+                           data_dir=fuser_path,
+                           desc=f'Loading first position',
+                           leave=leave,
+                           )
+    first_position_df.set_index('gufi', inplace=True)
+    first_position_df.to_parquet(os.path.join(out_dir, 'first_position.parquet'))
+
+    lamp_df = load_fuser(airport,
+                         'LAMP',
+                         types={'timestamp': 'datetime', 'forecast_timestamp': 'datetime', 'temperature': 'float16',
+                                'wind_direction': 'float16', 'wind_speed': 'float16', 'wind_gust': 'float16',
+                                'cloud_ceiling': 'float16', 'visibility': 'float16', 'cloud': 'category',
+                                'lightning_prob': 'category', 'precip': 'bool'},
+                         data_dir=fuser_path,
+                         desc=f'Loading lamp',
+                         leave=leave
+                         )
+    lamp_df.to_parquet(os.path.join(out_dir, 'lamp.parquet'))
+
     # Actual arrival times
     runway_df = load_fuser(airport,
                            'runways',
                            types={'gufi': 'str',
                                   'arrival_runway_actual_time': 'datetime',
-                                  'arrival_runway_actual': 'datetime',
+                                  'arrival_runway_actual': 'category',
                                   },
                            data_dir=fuser_path,
-                           desc=f'Loading {'runways'}',
+                           desc=f'Loading runways',
                            leave=leave,
                            )
     runway_df = runway_df[runway_df['arrival_runway_actual_time'].notna()]
@@ -488,7 +515,6 @@ def preprocess_fuser(airport, data_dir, out_dir, test=False, leave=True):
     MFS_df.to_parquet(os.path.join(out_dir, 'MFS_df.parquet'))
     del MFS_df
     gc.collect()
-
     TBFM_df = load_fuser(airport,
                          'TBFM',
                          types={'gufi': 'str',
@@ -513,12 +539,41 @@ def preprocess_fuser(airport, data_dir, out_dir, test=False, leave=True):
     # fuser_data.to_hdf('fuser_train.h5', key='fuser_data', format='table')
 
 
+def fill_missing_estimated_times(df, fallback):
+    """
+    Fills missing values in the 'arrival_runway_estimated_time' column using other columns
+    in a predefined order of preference.
+
+    Parameters:
+        df (pd.DataFrame): The DataFrame containing the relevant columns.
+
+    Returns:
+        pd.DataFrame: The DataFrame with filled 'arrival_runway_estimated_time'.
+    """
+    # Define the columns to use for filling in order of preference
+    fill_columns = [
+        'arrival_runway_sta_time_stamp',
+        'arrival_runway_sta',
+        'timestamp_arrival_runway_estimate'
+    ]
+
+    for col in fill_columns:
+        # Use the values from the current column to fill nulls in 'arrival_runway_estimated_time'
+        df['arrival_runway_estimated_time'] = df['arrival_runway_estimated_time'].fillna(df[col])
+
+    # Optional: Handle cases where all fallback columns are null
+    # You can fill remaining nulls with a placeholder or leave them as is
+    df['arrival_runway_estimated_time'].fillna(fallback, inplace=True)  # Example: placeholder value
+
+    return df
+
 class NASAAirportDataset(Dataset):
     def __init__(self,
                  airport_code: str,
                  data_dir,
                  scale_min = -1.0,
                  scale_max = 1.0,
+                 to_tensor = True,
                  transform=None,
                  target_transform=None):
         """
@@ -538,6 +593,15 @@ class NASAAirportDataset(Dataset):
         self.data_dir = data_dir
         self.scale_min = scale_min
         self.scale_max = scale_max
+        self.to_tensor = to_tensor
+
+        self.first_position_df = pd.read_parquet(os.path.join(data_dir, 'fuser', airport_code, 'first_position.parquet'))
+        self.first_position_df['time_first_tracked'] = pd.to_datetime(self.first_position_df['time_first_tracked'],
+                                                                      format='mixed')
+
+        self.lamp_df = pd.read_parquet(os.path.join(data_dir, 'fuser', airport_code, 'lamp.parquet'))
+        self.lamp_df['timestamp'] = pd.to_datetime(self.lamp_df['timestamp'], format='mixed')
+        self.lamp_df['forecast_timestamp'] = pd.to_datetime(self.lamp_df['forecast_timestamp'], format='mixed')
 
         self.runway_df = pd.read_parquet(os.path.join(data_dir, 'fuser', airport_code, 'runway_df.parquet'))
         self.runway_df['arrival_runway_actual_time'] = pd.to_datetime(self.runway_df['arrival_runway_actual_time'],
@@ -546,9 +610,9 @@ class NASAAirportDataset(Dataset):
         self.mfs_df = pd.read_parquet(os.path.join(data_dir, 'fuser', airport_code, 'MFS_df.parquet'))
         self.tbfm_df = pd.read_parquet(os.path.join(data_dir, 'fuser', airport_code, 'TBFM_df.parquet'))
         self.tbfm_df['arrival_runway_sta_time_stamp'] = pd.to_datetime(self.tbfm_df['arrival_runway_sta_time_stamp'],
-                                                                       format='mixed')
+                                                                      format='mixed')
         self.tbfm_df['arrival_runway_sta'] = pd.to_datetime(self.tbfm_df['arrival_runway_sta'],
-                                                            format='mixed')
+                                                                      format='mixed')
         self.tfm_df = pd.read_parquet(os.path.join(data_dir, 'fuser', airport_code, 'tfm_df.parquet'))
         self.tfm_df['timestamp_arrival_runway_estimate'] = pd.to_datetime(
             self.tfm_df['timestamp_arrival_runway_estimate'],
@@ -556,7 +620,7 @@ class NASAAirportDataset(Dataset):
         self.tfm_df['arrival_runway_estimated_time'] = pd.to_datetime(self.tfm_df['arrival_runway_estimated_time'],
                                                                       format='mixed')
 
-        for df_name in ['mfs_df', 'tbfm_df', 'tfm_df', 'runway_df']:
+        for df_name in ['mfs_df', 'tbfm_df', 'tfm_df', 'runway_df', 'lamp_df', 'first_position_df']:
             df = getattr(self, df_name)
 
             # Convert object columns to category
@@ -596,12 +660,42 @@ class NASAAirportDataset(Dataset):
         return len(self.runway_df)
 
     def __getitem__(self, timestamp):
+        end_time = timestamp + timedelta(hours=3)
         runway_rows = self.runway_df.loc[(self.runway_df['arrival_runway_actual_time'] > timestamp) & (
-                    self.runway_df['arrival_runway_actual_time'] < (timestamp + timedelta(hours=3)))].copy()
+                    self.runway_df['arrival_runway_actual_time'] < end_time)].copy()
 
         runway_rows = runway_rows.join(self.mfs_df, on='gufi')
+        # This needs to be done here as to get the latest flight data
         runway_rows = runway_rows.join(self.tbfm_df, on='gufi').groupby(level='gufi').agg(max)
         runway_rows = runway_rows.join(self.tfm_df, on='gufi').groupby(level='gufi').agg(max)
+
+        runway_rows = fill_missing_estimated_times(runway_rows, end_time)
+
+        # Sort by time for merge_asof
+        runway_rows_sorted = runway_rows.reset_index().sort_values('arrival_runway_estimated_time')
+        lamp_sorted = self.lamp_df.sort_values('forecast_timestamp')
+
+        # Perform asof merge to find nearest forecast_timestamp for each arrival_runway_estimated_time
+        merged = pd.merge_asof(
+            runway_rows_sorted,
+            lamp_sorted,
+            left_on='arrival_runway_estimated_time',
+            right_on='forecast_timestamp',
+            direction='nearest'
+        )
+
+        # Keep only rows that have a match from lamp_df (i.e., forecast_timestamp is not NaN)
+        merged.dropna(subset=['forecast_timestamp'], inplace=True)
+
+        # If needed, restore the original index. Assuming 'gufi' was the unique index:
+        if 'gufi' in runway_rows.index.names:
+            merged.set_index('gufi', inplace=True, drop=True)
+
+        runway_rows = merged
+        runway_rows.join(self.first_position_df[self.first_position_df['time_first_tracked'] < timestamp].notna(),
+                         on='gufi')
+
+        runway_rows.drop([], inplace=True)
 
         # Convert all datetime columns in x to scaled time deltas
         datetime_cols = runway_rows.select_dtypes(include=['datetime64[ns]']).columns
@@ -619,35 +713,49 @@ class NASAAirportDataset(Dataset):
         y = runway_rows['arrival_runway_actual_time']
         x = runway_rows.drop('arrival_runway_sta_time_stamp', axis=1)
 
-        x = x.to_numpy(dtype='float32')
-        x = torch.tensor(x, dtype=torch.float32)
+        if self.to_tensor:
+            x = x.to_numpy(dtype='float32')
+            x = torch.tensor(x, dtype=torch.float32)
 
-        y = y.to_numpy(dtype='float32')
-        y = torch.tensor(y, dtype=torch.float32)
+            y = y.to_numpy(dtype='float32')
+            y = torch.tensor(y, dtype=torch.float32)
 
-        # Apply any transformations if defined
-        if self.transform:
-            x = self.transform(x)
-        if self.target_transform:
-            y = self.target_transform(y)
+            if self.transform:
+                x = self.transform(x)
+            if self.target_transform:
+                y = self.target_transform(y)
 
         return x, y
 
 
 if __name__ == '__main__':
-    # for x, y in ds:
-    #     print(x, y)
+
+
+    preprocess_metar_taf('data', os.path.join('data','preprocess', 'test'), test=False)
+    preprocess_metar_taf('data', os.path.join('data','preprocess', 'test'), test=True)
 
     fuser_types = set(
         [re.match(r'.*\.(.*)_data_set.csv', os.path.basename(file)).group(1) for file in glob.glob("data/KATL/*.csv")])
     airports = set([os.path.basename(file) for file in glob.glob("data/FUSER_test/*")])
+    print(fuser_types)
 
     for term in (pbar := tqdm(airports)):
         pbar.set_description(f'Loading: {term}')
         # print('preprocessing:', term)
         preprocess_fuser(term, 'data', os.path.join('data','preprocess', 'train', 'fuser', term), test=False, leave=False)
-        preprocess_fuser(term, 'data', os.path.join('data','preprocess', 'test', 'fuser', term), test=True, leave=False)
-
-    preprocess_metar_taf('data', os.path.join('data','preprocess', 'test'), test=False)
-    preprocess_metar_taf('data', os.path.join('data','preprocess', 'test'), test=True)
+        preprocess_fuser(term, 'data', os.path.join('data','preprocess', 'test',  'fuser', term), test=True,  leave=False)
+    # # this will take a while
+    # train_ds = NASAAirportDataset('KCLT', 'data/preprocess/train')
+    # start = datetime(2022, 9, 30, 0, 0, 0)  # Start of the range
+    # end = datetime(2023, 9, 30, 23, 0)  # End of the range
+    # n_samples = 100
+    # time_samples = [start + timedelta(seconds=random.randint(0, int((end - start).total_seconds()))) for _ in
+    #                 range(n_samples)]
+    #
+    # for i in time_samples:
+    #     print('Flights at time', i)
+    #     inputs, targets = train_ds[i]
+    #     print(inputs)
+    #     print(targets)
+    #     # for flight_data in train_ds[i]:
 
