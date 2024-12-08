@@ -707,21 +707,7 @@ class NASAAirportDataset(Dataset):
                          on='gufi')
 
         # runway_rows.drop([], inplace=True)
-        runway_rows = runway_rows.notna()
-
-        x = runway_rows.drop('arrival_runway_actual_time', axis=1)
-        # Convert all datetime columns in x to scaled time deltas
-        datetime_cols = x.select_dtypes(include=['datetime64[ns]']).columns
-        # 3 hours = 10800 seconds. We'll map: timestamp-3h -> -1, timestamp -> 0, timestamp+3h -> 1
-        time_window_seconds = 3 * 3600.0
-
-        for col in datetime_cols:
-            # Convert to time delta in seconds relative to timestamp
-            deltas = (x[col] - timestamp).dt.total_seconds()
-            # Scale to [-1, 1] by dividing by 10800 (3 hours)
-            x[col] = deltas / time_window_seconds
-            # TODO: How do we deal with missing tiemes?!?!? setting to max value for now
-            x[col].fillna(self.scale_max, inplace=True)
+        runway_rows = runway_rows[runway_rows.notna()]
 
         # Separate features (x) and target (y)
         y = runway_rows['arrival_runway_actual_time']
@@ -741,6 +727,21 @@ class NASAAirportDataset(Dataset):
         y = torch.zeros((len(bins), num_bins), dtype=torch.float32, device=self.device)
         y[torch.arange(len(bins)), bins] = 1
 
+        x = runway_rows.drop('arrival_runway_actual_time', axis=1)
+        # Convert all datetime columns in x to scaled time deltas
+        datetime_cols = x.select_dtypes(include=['datetime64[ns]']).columns
+        # 3 hours = 10800 seconds. We'll map: timestamp-3h -> -1, timestamp -> 0, timestamp+3h -> 1
+        time_window_seconds = 3 * 3600.0
+
+        for col in datetime_cols:
+            # Convert to time delta in seconds relative to timestamp
+            deltas = (x[col] - timestamp).dt.total_seconds()
+            # Scale to [-1, 1] by dividing by 10800 (3 hours)
+            x[col] = deltas / time_window_seconds
+            # TODO: How do we deal with missing tiemes?!?!? setting to max value for now
+            x[col].fillna(self.scale_max, inplace=True)
+
+
         if self.to_tensor:
             x = x.to_numpy(dtype='float32')
             x = torch.tensor(x, dtype=torch.float32, device=self.device)
@@ -750,7 +751,6 @@ class NASAAirportDataset(Dataset):
                 y = self.target_transform(y)
 
         return x, y
-
 
 
 class SimpleFeedForward(nn.Module):
