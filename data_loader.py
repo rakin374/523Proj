@@ -730,25 +730,9 @@ class NASAAirportDataset(Dataset):
 
 if __name__ == '__main__':
 
-    # this will take a while
-    # train_ds = NASAAirportDataset('KCLT', 'data/preprocess/train')
 
     preprocess_metar_taf('data', os.path.join('data','preprocess', 'test'), test=False)
     preprocess_metar_taf('data', os.path.join('data','preprocess', 'test'), test=True)
-
-
-    start = datetime(2022, 9, 30, 0, 0, 0)  # Start of the range
-    end = datetime(2023, 9, 30, 23, 0)  # End of the range
-    n_samples = 100
-    time_samples = [start + timedelta(seconds=random.randint(0, int((end - start).total_seconds()))) for _ in
-                    range(n_samples)]
-
-    for i in time_samples:
-        print('Flights at time', i)
-        inputs, targets = train_ds[i]
-        print(inputs)
-        print(targets)
-        # for flight_data in train_ds[i]:
 
     fuser_types = set(
         [re.match(r'.*\.(.*)_data_set.csv', os.path.basename(file)).group(1) for file in glob.glob("data/KATL/*.csv")])
@@ -760,4 +744,18 @@ if __name__ == '__main__':
         # print('preprocessing:', term)
         preprocess_fuser(term, 'data', os.path.join('data','preprocess', 'train', 'fuser', term), test=False, leave=False)
         preprocess_fuser(term, 'data', os.path.join('data','preprocess', 'test',  'fuser', term), test=True,  leave=False)
+    # # this will take a while
+    # train_ds = NASAAirportDataset('KCLT', 'data/preprocess/train')
+    # start = datetime(2022, 9, 30, 0, 0, 0)  # Start of the range
+    # end = datetime(2023, 9, 30, 23, 0)  # End of the range
+    # n_samples = 100
+    # time_samples = [start + timedelta(seconds=random.randint(0, int((end - start).total_seconds()))) for _ in
+    #                 range(n_samples)]
+    #
+    # for i in time_samples:
+    #     print('Flights at time', i)
+    #     inputs, targets = train_ds[i]
+    #     print(inputs)
+    #     print(targets)
+    #     # for flight_data in train_ds[i]:
 
