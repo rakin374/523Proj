@@ -22,6 +22,12 @@ import pandas as pdf
 from functools import partial
 from datetime import timedelta
 from typing import Optional, List
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import warnings
+from torch.utils.data import DataLoader
+
 
 log.basicConfig(
     level=log.INFO,
@@ -575,7 +581,10 @@ class NASAAirportDataset(Dataset):
                  scale_max = 1.0,
                  to_tensor = True,
                  transform=None,
-                 target_transform=None):
+                 target_transform=None,
+                 device='cuda',
+                 ):
+
         """
         A PyTorch Dataset for NASA Airport Throughput Prediction Challenge.
 
@@ -594,6 +603,8 @@ class NASAAirportDataset(Dataset):
         self.scale_min = scale_min
         self.scale_max = scale_max
         self.to_tensor = to_tensor
+        # TODO: make argument
+        self.device = torch.device(device)
 
         self.first_position_df = pd.read_parquet(os.path.join(data_dir, 'fuser', airport_code, 'first_position.parquet'))
         self.first_position_df['time_first_tracked'] = pd.to_datetime(self.first_position_df['time_first_tracked'],
@@ -695,31 +706,44 @@ class NASAAirportDataset(Dataset):
         runway_rows.join(self.first_position_df[self.first_position_df['time_first_tracked'] < timestamp].notna(),
                          on='gufi')
 
-        runway_rows.drop([], inplace=True)
+        # runway_rows.drop([], inplace=True)
+        runway_rows = runway_rows.notna()
 
+        x = runway_rows.drop('arrival_runway_actual_time', axis=1)
         # Convert all datetime columns in x to scaled time deltas
-        datetime_cols = runway_rows.select_dtypes(include=['datetime64[ns]']).columns
+        datetime_cols = x.select_dtypes(include=['datetime64[ns]']).columns
         # 3 hours = 10800 seconds. We'll map: timestamp-3h -> -1, timestamp -> 0, timestamp+3h -> 1
         time_window_seconds = 3 * 3600.0
 
         for col in datetime_cols:
             # Convert to time delta in seconds relative to timestamp
-            deltas = (runway_rows[col] - timestamp).dt.total_seconds()
+            deltas = (x[col] - timestamp).dt.total_seconds()
             # Scale to [-1, 1] by dividing by 10800 (3 hours)
-            runway_rows[col] = deltas / time_window_seconds
+            x[col] = deltas / time_window_seconds
             # TODO: How do we deal with missing tiemes?!?!? setting to max value for now
-            runway_rows[col].fillna(self.scale_max, inplace=True)
+            x[col].fillna(self.scale_max, inplace=True)
 
+        # Separate features (x) and target (y)
         y = runway_rows['arrival_runway_actual_time']
-        x = runway_rows.drop('arrival_runway_sta_time_stamp', axis=1)
+
+        # Transform y into 15-minute bins
+        bin_size_seconds = 15 * 60  # 15 minutes in seconds
+        num_bins = 12  # 3 hours divided into 15-minute intervals
+
+        # Compute time deltas relative to the timestamp
+        time_deltas = (y - timestamp).dt.total_seconds()
+
+        # Bin the time deltas into 15-minute intervals
+        bins = (time_deltas // bin_size_seconds).astype(int)
+        bins = bins.clip(0, num_bins - 1)  # Clip bins to the valid range [0, 11]
+
+        # One-hot encode the bins
+        y = torch.zeros((len(bins), num_bins), dtype=torch.float32, device=self.device)
+        y[torch.arange(len(bins)), bins] = 1
 
         if self.to_tensor:
             x = x.to_numpy(dtype='float32')
-            x = torch.tensor(x, dtype=torch.float32)
-
-            y = y.to_numpy(dtype='float32')
-            y = torch.tensor(y, dtype=torch.float32)
-
+            x = torch.tensor(x, dtype=torch.float32, device=self.device)
             if self.transform:
                 x = self.transform(x)
             if self.target_transform:
@@ -728,34 +752,67 @@ class NASAAirportDataset(Dataset):
         return x, y
 
 
+
+class SimpleFeedForward(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super(SimpleFeedForward, self).__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim)
+        )
+
+    def forward(self, x):
+        return self.layers(x)
+
+def time_sampler(n_samples, start=datetime(2022, 9, 1, 0, 0, 0), end=datetime(2023, 9, 2, 23, 0)):
+    i = 0
+    while i < n_samples:
+        yield start + timedelta(seconds=random.randint(0, int((end - start).total_seconds())))
+        i += 1
+def data_itr():
+    for time in time_sampler(np.inf):
+        yield train_ds[time]
+# time_samples = [start + timedelta(seconds=random.randint(0, int((end - start).total_seconds()))) for _ in range(n_samples)]
+
+
 if __name__ == '__main__':
 
+    warnings.simplefilter(action='ignore', category=FutureWarning)
+    # this will take a while
+    train_ds = NASAAirportDataset('KCLT', 'data/preprocess/train')
 
-    preprocess_metar_taf('data', os.path.join('data','preprocess', 'test'), test=False)
-    preprocess_metar_taf('data', os.path.join('data','preprocess', 'test'), test=True)
+    input_dim = 1326
+    output_dim = 4 * 3   # 15 min intervals across 3 hours
+    hidden_dim = 64
 
-    fuser_types = set(
-        [re.match(r'.*\.(.*)_data_set.csv', os.path.basename(file)).group(1) for file in glob.glob("data/KATL/*.csv")])
-    airports = set([os.path.basename(file) for file in glob.glob("data/FUSER_test/*")])
-    print(fuser_types)
+    model = SimpleFeedForward(input_dim, hidden_dim, output_dim)
 
-    for term in (pbar := tqdm(airports)):
-        pbar.set_description(f'Loading: {term}')
-        # print('preprocessing:', term)
-        preprocess_fuser(term, 'data', os.path.join('data','preprocess', 'train', 'fuser', term), test=False, leave=False)
-        preprocess_fuser(term, 'data', os.path.join('data','preprocess', 'test',  'fuser', term), test=True,  leave=False)
-    # # this will take a while
-    # train_ds = NASAAirportDataset('KCLT', 'data/preprocess/train')
-    # start = datetime(2022, 9, 30, 0, 0, 0)  # Start of the range
-    # end = datetime(2023, 9, 30, 23, 0)  # End of the range
-    # n_samples = 100
-    # time_samples = [start + timedelta(seconds=random.randint(0, int((end - start).total_seconds()))) for _ in
-    #                 range(n_samples)]
-    #
-    # for i in time_samples:
-    #     print('Flights at time', i)
-    #     inputs, targets = train_ds[i]
-    #     print(inputs)
-    #     print(targets)
-    #     # for flight_data in train_ds[i]:
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+
+    num_epochs = 1000
+    model.train()
+
+    # for epoch, time in (pbar := tqdm(enumerate(time_sampler(num_epochs)))):
+    for epoch in (pbar := range(num_epochs)):
+        running_loss = 0.0
+        epoch_len = 0
+
+        for x_batch, y_batch in data_itr():
+            epoch_len = len(x_batch)
+            optimizer.zero_grad()
+            outputs = model(x_batch)  # forward pass
+            loss = criterion(outputs, y_batch)
+            loss.backward()  # backpropagate
+            optimizer.step()  # update weights
+
+            running_loss += loss.item() * x_batch.size(0)
+
+        epoch_loss = running_loss / epoch_len
+        pbar.set_description(f"Epoch [{epoch+1}/{num_epochs}], Loss: {epoch_loss:.4f}")
+
+    print("Training completed.")
 
