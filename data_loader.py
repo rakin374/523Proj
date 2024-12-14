@@ -428,7 +428,27 @@ def preprocess_fuser(airport, data_dir, out_dir, test=False, leave=True):
 
     os.makedirs(out_dir, exist_ok=True)
 
-    # TODO: load 'configs', fun facts about the airport
+    configs_df = load_fuser(airport,
+                            'configs',
+                            types={'data_header': 'str',
+                                   'src_addr': 'str',
+                                   'datis_time': 'str',
+                                   'start_time': 'str',
+                                   'weather_report': 'str',
+                                   'arrival_runways': 'str',
+                                   'timestamp_source_received': 'str',
+                                   'timestamp_source_processed': 'str',
+                                   'invalid_departure_runways': 'str',
+                                   'invalid_arrival_runways': 'str',
+                                   'departure_runway_string': 'str',
+                                   'arrival_runway_string': 'str',
+                                   'airport_configuration_name': 'str'},
+                            data_dir=fuser_path,
+                            desc=f'Loading configs',
+                            leave=leave,
+                            )
+    # configs_df.set_index('gufi', inplace=True)
+    configs_df.to_parquet(os.path.join(out_dir, 'configs.parquet'))
 
     first_position_df = load_fuser(airport,
                            'first_position',
@@ -537,17 +557,6 @@ def preprocess_fuser(airport, data_dir, out_dir, test=False, leave=True):
 
 
 def fill_missing_estimated_times(df, fallback):
-    """
-    Fills missing values in the 'arrival_runway_estimated_time' column using other columns
-    in a predefined order of preference.
-
-    Parameters:
-        df (pd.DataFrame): The DataFrame containing the relevant columns.
-
-    Returns:
-        pd.DataFrame: The DataFrame with filled 'arrival_runway_estimated_time'.
-    """
-    # Define the columns to use for filling in order of preference
     fill_columns = [
         'arrival_runway_sta_time_stamp',
         'arrival_runway_sta',
@@ -555,13 +564,9 @@ def fill_missing_estimated_times(df, fallback):
     ]
 
     for col in fill_columns:
-        # Use the values from the current column to fill nulls in 'arrival_runway_estimated_time'
         df['arrival_runway_estimated_time'] = df['arrival_runway_estimated_time'].fillna(df[col])
 
-    # Optional: Handle cases where all fallback columns are null
-    # You can fill remaining nulls with a placeholder or leave them as is
     df['arrival_runway_estimated_time'].fillna(fallback, inplace=True)  # Example: placeholder value
-
     return df
 
 class NASAAirportDataset(Dataset):
@@ -574,22 +579,11 @@ class NASAAirportDataset(Dataset):
                  to_tensor = True,
                  device='cuda',
                  ):
-
-        """
-        A PyTorch Dataset for NASA Airport Throughput Prediction Challenge.
-
-        Parameters:
-            airport_code (str): ICAO code of the airport (e.g., 'KJFK').
-            start_dt (datetime): Start datetime for the data to load.
-            end_dt (datetime): End datetime for the data to load.
-            data_dir (str): Base directory for the data.
-        """
         self.airport_code = airport_code
         self.data_dir = data_dir
         self.scale_min = scale_min
         self.scale_max = scale_max
         self.to_tensor = to_tensor
-        # TODO: make argument
         self.device = torch.device(device)
 
         print('loading first position')
@@ -627,6 +621,7 @@ class NASAAirportDataset(Dataset):
         self.time_range = (min(self.runway_df['arrival_runway_actual_time']), max(self.runway_df['arrival_runway_actual_time']))
         self.n_presamples = n_presamples
         if n_presamples is not None:
+
             self.presample_idx = [self.get_random_time() for _ in range(n_presamples)]
             print('gathering presamples ...')
             # with Pool(max(1, cpu_count() - 1)) as pool:
@@ -635,12 +630,22 @@ class NASAAirportDataset(Dataset):
             #     pool.imap(self.get_flights_at, self.presample_idx)
             # , total=len(self.presample_idx), desc='Loading time presamples', leave=False))
             # with Pool(1) as pool:
-            #     results = list(tqdm(pool.imap(self.get_flights_at, self.presample_idx), total=len(self.presample_idx), desc='Loading time presamples', leave=False))
+            #     self.presamples = list(tqdm(pool.imap(self.get_flights_at, self.presample_idx), total=len(self.presample_idx), desc='Loading time presamples', leave=False))
             self.presamples = [self.get_flights_at(samp) for samp in tqdm(self.presample_idx)]
+            # we don't need these anymore
+            del self.first_position_df
+            del self.lamp_df
+            del self.runway_df
+            del self.tfm_df
+            del self.tbfm_df
+            del self.mfs_df
+            gc.collect()
+
             self.presamples = pd.concat(self.presamples)
             self.presamples = self.normalize_times(self.presamples)
             self.presamples = self.normalize_times(self.presamples)
             self.X, self.Y = self.torchify(self.presamples)
+
 
     def normalize(self):
         print('normalizing numeric and categorical data')
@@ -654,6 +659,9 @@ class NASAAirportDataset(Dataset):
 
             cat_cols = df.select_dtypes(include=['category']).columns
             df = pd.get_dummies(df, columns=cat_cols, dummy_na=True)
+            for c in df.columns:
+                print(c)
+            print(df.columns)
 
             for one_hot_col in df.select_dtypes(include=['bool']).columns:
                 df[one_hot_col] = df[one_hot_col].astype('int')
@@ -663,14 +671,13 @@ class NASAAirportDataset(Dataset):
             numeric_cols = df.select_dtypes(include=[np.number]).columns
             numeric_cols = [c for c in numeric_cols if c not in datetime_cols]
 
-            # Scale numeric columns to [-1, 1]
+            # Scale numeric columns to [0, 1]
             for col in numeric_cols:
                 col_min = df[col].min()
                 col_max = df[col].max()
                 if col_max != col_min:
                     df[col] = ((df[col] - col_min) / (col_max - col_min)) * (self.scale_max - self.scale_min) + self.scale_min
                 else:
-                    # Constant column, just set it to 0
                     df[col] = (self.scale_min + self.scale_max) / 2
             setattr(self, df_name, df)
 
@@ -690,18 +697,18 @@ class NASAAirportDataset(Dataset):
                     self.runway_df['arrival_runway_actual_time'] < end_time)].copy()
 
         runway_rows = runway_rows.join(self.mfs_df, on='gufi')
-        # This needs to be done here as to get the latest flight data
 
+        # This needs to be done here as to get the latest flight data
         runway_rows =  runway_rows.join(self.tbfm_df.loc[self.tbfm_df['arrival_runway_sta_time_stamp'] <= timestamp], on='gufi').groupby(level='gufi').last()
         runway_rows =  runway_rows.join(self.tfm_df.loc[self.tfm_df['timestamp_arrival_runway_estimate'] <= timestamp], on='gufi').groupby(level='gufi').last()
 
         runway_rows = fill_missing_estimated_times(runway_rows, end_time)
 
-        # Sort by time for merge_asof
+        # TODO: Sort by time for merge_asof
         runway_rows_sorted = runway_rows.reset_index().sort_values('arrival_runway_estimated_time')
         lamp_sorted = self.lamp_df.sort_values('forecast_timestamp')
 
-        # Perform asof merge to find nearest forecast_timestamp for each arrival_runway_estimated_time
+        # TODO: Perform asof merge to find nearest forecast_timestamp for each arrival_runway_estimated_time
         merged = pd.merge_asof(
             runway_rows_sorted,
             lamp_sorted,
@@ -710,10 +717,9 @@ class NASAAirportDataset(Dataset):
             direction='nearest'
         )
 
-        # Keep only rows that have a match from lamp_df (i.e., forecast_timestamp is not NaN)
+        # Keep only rows that have a match from lamp_df
         merged.dropna(subset=['forecast_timestamp'], inplace=True)
 
-        # If needed, restore the original index. Assuming 'gufi' was the unique index:
         if 'gufi' in runway_rows.index.names:
             merged.set_index('gufi', inplace=True, drop=True)
 
@@ -731,7 +737,7 @@ class NASAAirportDataset(Dataset):
 
         # Convert all datetime columns in x to scaled time deltas
         datetime_cols = runway_rows.select_dtypes(include=['datetime64[ns]']).columns
-        # 3 hours = 10800 seconds. We'll map: timestamp-3h -> -1, timestamp -> 0, timestamp+3h -> 1
+        # 3 hours = 10800 seconds = 3 * 3600
         time_window_seconds = 3 * 3600.0
 
         for col in datetime_cols:
@@ -742,17 +748,6 @@ class NASAAirportDataset(Dataset):
             # TODO: How do we deal with missing tiemes?!?!? setting to max value for now
             runway_rows[col].fillna(self.scale_max, inplace=True)
 
-
-        # Compute time deltas relative to the timestamp
-        # time_deltas = runway_rows['arrival_runway_actual_time'].dt.total_seconds()
-        # time_deltas = runway_rows['arrival_runway_actual_time'] * 12
-        # time_deltas.loc[time_deltas['arrival_runway_actual_time'] > 12] = np.inf
-
-        # bins = (time_deltas // bin_size_seconds).astype(int)
-        # bins = bins.clip(0, num_bins - 1)  # Clip bins to the valid range [0, 11]
-
-        # y = torch.zeros((len(bins), num_bins), dtype=torch.float32, device=self.device)
-        # y[torch.arange(len(bins)), bins] = 1
 
         return runway_rows
 
@@ -780,7 +775,14 @@ class NASAAirportDataset(Dataset):
         if self.n_presamples is not None:
             return self.X[index], self.Y[index]
         else:
-            return self.get_flights_at(index)
+            rows = self.get_flights_at(self.get_random_time())
+            # if len(rows) == 0:
+            #     return [], []
+
+            rows = pd.concat(rows)
+            rows = self.normalize_times(rows)
+            rows = self.normalize_times(rows)
+            return self.torchify(rows)
 
 class SimpleFeedForward(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
@@ -808,12 +810,36 @@ def data_itr():
 
 
 if __name__ == '__main__':
-
     warnings.simplefilter(action='ignore', category=FutureWarning)
     # this will take a while
-    train_ds = NASAAirportDataset('KCLT', 'data/preprocess/train', n_presamples=10)
-    for i in train_ds:
-        print(i)
+    # train_ds = NASAAirportDataset('KCLT', 'data/preprocess/test', n_presamples=10)
+    # for i in train_ds:
+    #     print(i)
+    # input_dim = 1326
+
+    # Get all fuser types
+    fuser_types = set(
+        [re.match(r'.*\.(.*)_data_set.csv', os.path.basename(file)).group(1) for file in glob.glob("data/KATL/*.csv")])
+    # get all of the airport terminals
+    airports = set([os.path.basename(file) for file in glob.glob("data/FUSER_test/*")])
+    print(fuser_types)
+
+    for term in (pbar := tqdm(airports)):
+        pbar.set_description(f'Loading: {term}')
+        # print('preprocessing:', term)
+        preprocess_fuser(term, 'data', os.path.join('data','preprocess', 'train', 'fuser', term), test=False, leave=False)
+        preprocess_fuser(term, 'data', os.path.join('data','preprocess', 'test',  'fuser', term), test=True,  leave=False)
+
+    preprocess_metar_taf('data', os.path.join('data','preprocess', 'test'), test=False)
+    preprocess_metar_taf('data', os.path.join('data','preprocess', 'test'), test=True)
+    # # this will take a while
+    # train_ds = NASAAirportDataset('KCLT', 'data/preprocess/train')
+    # start = datetime(2022, 9, 30, 0, 0, 0)  # Start of the range
+    # end = datetime(2023, 9, 30, 23, 0)  # End of the range
+    # n_samples = 100
+    # time_samples = [start + timedelta(seconds=random.randint(0, int((end - start).total_seconds()))) for _ in
+    #                 range(n_samples)]
+
     # input_dim = 1326
     # output_dim = 4 * 3   # 15 min intervals across 3 hours
     # hidden_dim = 64
