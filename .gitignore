@@ -1,4 +1,5 @@
 /compressed_data/
-/data/
 /.venv/
 /venv/
+/notebooks/tempdata
+
